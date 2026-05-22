@@ -1,6 +1,6 @@
 import inspect
 import json
-import os
+
 
 from openai import OpenAI
 
@@ -10,9 +10,12 @@ from typing import Any, Dict, List, Tuple
 
 load_dotenv()
 
+client = OpenAI()
+
 YOU_COLOR = "\u001b[94m"
 ASSISTANT_COLOR = "\u001b[93m"
 RESET_COLOR = "\u001b[0m"
+
 
 def resolve_abs_path(path_str: str) -> Path:
     """
@@ -30,7 +33,6 @@ def read_file_tool(filename: str) -> Dict[str, Any]:
     :return: The full content of the file.
     """
     abs_path = resolve_abs_path(filename)
-    print(abs_path)
     with open(abs_path, 'r') as file:
         content = file.read()
     return {"file_path": str(abs_path), "content": content}
@@ -43,7 +45,7 @@ def list_files_tool(path: str) -> Dict[str, Any]:
     """
     abs_path = resolve_abs_path(path)
     files = []
-    for sub_path in abs_path.iterdir() if abs_path.is_dir():
+    for sub_path in abs_path.iterdir():
         files.append({
             "file_name": sub_path.name,
             "kind": "file" if sub_path.is_file() else "dir"
@@ -60,3 +62,23 @@ def edit_file_tool(path: str, old_str: str, new_str: str) -> Dict[str, Any]:
     :return: A dictionary with the path to the file and the action taken.
     """
     abs_path = resolve_abs_path(path)
+
+    if old_str == "":
+        abs_path.write_text(new_str)
+        return {"file_path": str(abs_path), "action": "New file created"}
+    
+    existing_text = abs_path.read_text()
+
+    if (existing_text.find(old_str) == -1):
+        return {"file_path": str(abs_path), "action": "Error, `old_str` not found"}
+    
+    updated_text = existing_text.replace(old_str, new_str, 1)
+    abs_path.write_text(updated_text)
+    return {"file_path": str(abs_path), "action": "File updated"}
+
+
+TOOL_LIST = {
+    "read_file": read_file_tool,
+    "list_files": list_files_tool,
+    "edit_file": edit_file_tool
+}
