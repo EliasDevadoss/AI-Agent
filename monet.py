@@ -26,6 +26,7 @@ class ToolCallResult(TypedDict):
     data: {}
     errors: str | None
 
+
 def resolve_abs_path(path_str: str) -> Path:
     """
     file.py -> /Users/you/project/file.py
@@ -34,8 +35,11 @@ def resolve_abs_path(path_str: str) -> Path:
     if not path.is_absolute():
         path = (Path.cwd() / path).resolve()
     if path != PROJECT_ROOT and PROJECT_ROOT not in path.parents():
-        raise PermissionError(f"Attempting to edit outside allowed current directory at: {path}")
+        raise PermissionError(
+            f"Attempting to edit outside allowed current directory at: {path}"
+        )
     return path
+
 
 def read_file_tool(filename: str) -> ToolCallResult:
     """
@@ -44,14 +48,12 @@ def read_file_tool(filename: str) -> ToolCallResult:
     :return: The full content of the file.
     """
     abs_path = resolve_abs_path(filename)
-    with open(abs_path, 'r') as file:
+    with open(abs_path, "r") as file:
         content = file.read()
     return ToolCallResult(
-        success=True,
-        file_path=str(abs_path),
-        data={"content": content},
-        errors=None
+        success=True, file_path=str(abs_path), data={"content": content}, errors=None
     )
+
 
 def list_files_tool(path: str) -> ToolCallResult:
     """
@@ -62,16 +64,16 @@ def list_files_tool(path: str) -> ToolCallResult:
     abs_path = resolve_abs_path(path)
     files = []
     for sub_path in abs_path.iterdir():
-        files.append({
-            "file_name": sub_path.name,
-            "kind": "file" if sub_path.is_file() else "dir"
-        })
+        files.append(
+            {
+                "file_name": sub_path.name,
+                "kind": "file" if sub_path.is_file() else "dir",
+            }
+        )
     return ToolCallResult(
-        success=True,
-        file_path=str(abs_path),
-        data={"files": files},
-        errors=None
+        success=True, file_path=str(abs_path), data={"files": files}, errors=None
     )
+
 
 def edit_file_tool(path: str, old_str: str, new_str: str) -> ToolCallResult:
     """
@@ -94,33 +96,33 @@ def edit_file_tool(path: str, old_str: str, new_str: str) -> ToolCallResult:
             success=True,
             file_path=str(abs_path),
             data={"action": "New file created"},
-            errors=None
+            errors=None,
         )
-    
+
     existing_text = abs_path.read_text()
 
-    if (existing_text.find(old_str) == -1):
+    if existing_text.find(old_str) == -1:
         return ToolCallResult(
             success=False,
             file_path=str(abs_path),
             data={"action": "None"},
-            errors="Error, `old_str` not found"
+            errors="Error, `old_str` not found",
         )
-    
+
     updated_text = existing_text.replace(old_str, new_str, 1)
     abs_path.write_text(updated_text)
     return ToolCallResult(
         success=True,
         file_path=str(abs_path),
         data={"action": "File updated"},
-        errors=None
+        errors=None,
     )
 
 
 TOOL_LIST = {
     "read_file": read_file_tool,
     "list_files": list_files_tool,
-    "edit_file": edit_file_tool
+    "edit_file": edit_file_tool,
 }
 
 SYSTEM_PROMPT = """
@@ -139,6 +141,7 @@ message, you may continue the task. Do not respond with multiple tool calls befo
 receiving a successful response. If no tool call is needed, respond normally.
 """
 
+
 def get_tool_str(tool_name: str) -> str:
     tool = TOOL_LIST[tool_name]
     return f"""
@@ -147,12 +150,14 @@ def get_tool_str(tool_name: str) -> str:
     Signature: {inspect.signature(tool)}
     """
 
+
 def get_full_system_prompt():
     full_tool_list = ""
     for tool_name in TOOL_LIST:
         full_tool_list += "TOOL:" + get_tool_str(tool_name)
-        full_tool_list += f"\n{'='*15}\n\n"
+        full_tool_list += f"\n{'=' * 15}\n\n"
     return SYSTEM_PROMPT.format(full_tool_list=full_tool_list)
+
 
 def extract_tool_calls(text: str) -> List[Tuple[str, Dict[str, Any]]]:
     """
@@ -165,7 +170,7 @@ def extract_tool_calls(text: str) -> List[Tuple[str, Dict[str, Any]]]:
         if not line.startswith("tool:"):
             continue
         try:
-            after = line[len("tool:"):].strip()
+            after = line[len("tool:") :].strip()
             name, rest = after.split("(", 1)
             name = name.strip()
             if not rest.endswith(")"):
@@ -177,13 +182,14 @@ def extract_tool_calls(text: str) -> List[Tuple[str, Dict[str, Any]]]:
             continue
     return invocations
 
+
 def execute_tool_call(name: str, args: Dict[str, str]) -> ToolCallResult:
     if name not in TOOL_LIST:
         return ToolCallResult(
             success=False,
             file_path=None,
             data={"args": args},
-            errors=f"Tool {name} not in tool list"
+            errors=f"Tool {name} not in tool list",
         )
     tool = TOOL_LIST[name]
 
@@ -196,7 +202,7 @@ def execute_tool_call(name: str, args: Dict[str, str]) -> ToolCallResult:
             success=False,
             file_path=None,
             data={"tool": name, "args": args},
-            errors=f"Invalid arguments: {e}. Expected signature: {str(sig)}. Got args: {args}"
+            errors=f"Invalid arguments: {e}. Expected signature: {str(sig)}. Got args: {args}",
         )
 
     return tool(**args)
@@ -205,55 +211,42 @@ def execute_tool_call(name: str, args: Dict[str, str]) -> ToolCallResult:
 def execute_llm_call(conversation: List[Dict[str, str]]):
     system_content = ""
     messages = []
-    
+
     for msg in conversation:
         if msg["role"] == "system":
             system_content = msg["content"]
         else:
             messages.append(msg)
-    
+
     response = claude_client.messages.create(
-        model=ai_model,
-        max_tokens=2000,
-        system=system_content,
-        messages=messages
+        model=ai_model, max_tokens=2000, system=system_content, messages=messages
     )
     return response.content[0].text
 
 
 def run_coding_agent_loop():
     print(get_full_system_prompt())
-    conversation = [{
-        "role": "system",
-        "content": get_full_system_prompt()
-    }]
+    conversation = [{"role": "system", "content": get_full_system_prompt()}]
     while True:
         try:
             user_input = input(f"{YOU_COLOR}You:{RESET_COLOR} ")
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt, EOFError:
             break
         if user_input == "quit" or user_input == "exit":
             break
-        conversation.append({
-            "role": "user",
-            "content": user_input.strip()
-        })
+        conversation.append({"role": "user", "content": user_input.strip()})
         while True:
             agent_response = execute_llm_call(conversation)
             tool_calls = extract_tool_calls(agent_response)
             if not tool_calls:
                 print(f"{ASSISTANT_COLOR}Assistant:{RESET_COLOR} {agent_response}")
-                conversation.append({
-                    "role": "assistant",
-                    "content": agent_response
-                })
+                conversation.append({"role": "assistant", "content": agent_response})
                 break
             for name, args in tool_calls:
                 print(name, args)
-                conversation.append({
-                    "role": "assistant",
-                    "content": f"tool: {name}({args})"
-                })
+                conversation.append(
+                    {"role": "assistant", "content": f"tool: {name}({args})"}
+                )
                 try:
                     resp = execute_tool_call(name, args)
                 except (FileNotFoundError, PermissionError, TypeError) as e:
@@ -261,12 +254,15 @@ def run_coding_agent_loop():
                         success=False,
                         file_path=None,
                         data={"tool": name, "args": args},
-                        errors=str(e)
+                        errors=str(e),
                     )
-                conversation.append({
-                    "role": "user",
-                    "content": f"tool_result({json.dumps(resp, separators=(",", ":"))})"
-                })
+                conversation.append(
+                    {
+                        "role": "user",
+                        "content": f"tool_result({json.dumps(resp, separators=(',', ':'))})",
+                    }
+                )
+
 
 if __name__ == "__main__":
     run_coding_agent_loop()
