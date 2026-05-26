@@ -10,7 +10,13 @@ from typing import Any, Dict, List, TypedDict
 load_dotenv()
 
 claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-ai_model = os.environ["AI_MODEL"]
+AI_MODEL = os.environ["AI_MODEL"]
+try:
+    MAX_TOKENS = int(os.environ.get("AI_MAX_TOKENS", "2000"))
+except ValueError:
+    raise ValueError("AI_MAX_TOKENS must be an integer")
+if MAX_TOKENS <= 0:
+    raise ValueError("AI_MAX_TOKENS must be greater than 0")
 
 PROJECT_ROOT = Path(os.environ.get("AGENT_PROJECT_ROOT", Path.cwd())).resolve()
 BLOCKED_FILE_NAMES = {".env", ".gitignore", "uv.lock"}
@@ -303,8 +309,8 @@ def format_tool_result(result: ToolCallResult) -> str:
 
 def execute_llm_call(conversation: List[Dict[str, Any]]):
     return claude_client.messages.create(
-        model=ai_model,
-        max_tokens=2000,
+        model=AI_MODEL,
+        max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         messages=conversation,
         tools=TOOL_DEFINITIONS,
@@ -327,6 +333,13 @@ def run_coding_agent_loop():
         failed_tool_rounds = 0
         while True:
             response = execute_llm_call(conversation)
+            if response.stop_reason == "max_tokens":
+                print(
+                    f"{ASSISTANT_COLOR}Monet:{RESET_COLOR} "
+                    "Stopped because max_tokens was reached; no tools were executed."
+                )
+                break
+
             assistant_content = [
                 block.model_dump(exclude_none=True) for block in response.content
             ]
