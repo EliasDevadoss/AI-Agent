@@ -13,7 +13,7 @@ claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 ai_model = os.environ["AI_MODEL"]
 
 PROJECT_ROOT = Path(os.environ.get("AGENT_PROJECT_ROOT", Path.cwd())).resolve()
-BLOCKED_WRITE_NAMES = {".env", ".gitignore", "uv.lock"}
+BLOCKED_FILE_NAMES = {".env", ".gitignore", "uv.lock"}
 
 YOU_COLOR = "\u001b[94m"
 ASSISTANT_COLOR = "\u001b[93m"
@@ -49,6 +49,11 @@ def read_file_tool(filename: str) -> ToolCallResult:
     :return: The full content of the file.
     """
     abs_path = resolve_abs_path(filename)
+    path_parts = abs_path.parts
+
+    if any(part in BLOCKED_FILE_NAMES for part in path_parts):
+        raise PermissionError(f"Not allowed to read protected file at: {abs_path}")
+
     with open(abs_path, "r") as file:
         content = file.read()
     return ToolCallResult(
@@ -88,7 +93,7 @@ def edit_file_tool(path: str, old_str: str, new_str: str) -> ToolCallResult:
     abs_path = resolve_abs_path(path)
     path_parts = abs_path.parts
 
-    if any(part in BLOCKED_WRITE_NAMES for part in path_parts):
+    if any(part in BLOCKED_FILE_NAMES for part in path_parts):
         raise PermissionError(f"Not allowed to edit protected file at: {abs_path}")
 
     if old_str == "":
@@ -256,7 +261,7 @@ def run_coding_agent_loop():
     while True:
         try:
             user_input = input(f"{YOU_COLOR}You:{RESET_COLOR} ")
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt, EOFError:
             break
         user_input = user_input.strip()
         if not user_input:
@@ -302,7 +307,11 @@ def run_coding_agent_loop():
                         errors=str(e),
                     )
                 tool_result = format_tool_result(resp)
-                truncated_tool_result = (tool_result[:1000] + "...") if len(tool_result) > 1000 else tool_result
+                truncated_tool_result = (
+                    (tool_result[:1000] + "...")
+                    if len(tool_result) > 1000
+                    else tool_result
+                )
                 print(f"{TOOL_COLOR}Tool result:{RESET_COLOR} {truncated_tool_result}")
                 tool_result_block = {
                     "type": "tool_result",
