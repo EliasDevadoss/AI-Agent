@@ -19,6 +19,7 @@ YOU_COLOR = "\u001b[94m"
 ASSISTANT_COLOR = "\u001b[93m"
 TOOL_COLOR = "\u001b[92m"
 RESET_COLOR = "\u001b[0m"
+MAX_FAILED_TOOL_ROUNDS = 3
 
 
 class ToolCallResult(TypedDict):
@@ -81,12 +82,42 @@ def list_files_tool(path: str) -> ToolCallResult:
     )
 
 
+def create_file_tool(path: str, content: str) -> ToolCallResult:
+    """
+    Creates a new text file with the provided content.
+    :param path: The path to the file to create.
+    :param content: The complete text content for the new file.
+    :return: A dictionary with the path to the file and the action taken.
+    """
+    abs_path = resolve_abs_path(path)
+    path_parts = abs_path.parts
+
+    if any(part in BLOCKED_FILE_NAMES for part in path_parts):
+        raise PermissionError(f"Not allowed to create protected file at: {abs_path}")
+
+    if abs_path.exists():
+        return ToolCallResult(
+            success=False,
+            file_path=str(abs_path),
+            data={"action": "None"},
+            errors="Error, file already exists. Use edit_file to modify existing files.",
+        )
+
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    abs_path.write_text(content)
+    return ToolCallResult(
+        success=True,
+        file_path=str(abs_path),
+        data={"action": "New file created"},
+        errors=None,
+    )
+
+
 def edit_file_tool(path: str, old_str: str, new_str: str) -> ToolCallResult:
     """
-    Replaces first occurrence of old_str with new_str in file. If old_str is empty,
-    create/overwrite file with new_str.
+    Replaces the first occurrence of old_str with new_str in an existing text file.
     :param path: The path to the file to edit.
-    :param old_str: The string to replace.
+    :param old_str: The exact non-empty string to replace.
     :param new_str: The string to replace with.
     :return: A dictionary with the path to the file and the action taken.
     """
@@ -97,12 +128,11 @@ def edit_file_tool(path: str, old_str: str, new_str: str) -> ToolCallResult:
         raise PermissionError(f"Not allowed to edit protected file at: {abs_path}")
 
     if old_str == "":
-        abs_path.write_text(new_str)
         return ToolCallResult(
-            success=True,
+            success=False,
             file_path=str(abs_path),
-            data={"action": "New file created"},
-            errors=None,
+            data={"action": "None"},
+            errors="Error, `old_str` cannot be empty. Use create_file to create new files.",
         )
 
     existing_text = abs_path.read_text()
@@ -128,6 +158,7 @@ def edit_file_tool(path: str, old_str: str, new_str: str) -> ToolCallResult:
 TOOL_LIST = {
     "read_file": read_file_tool,
     "list_files": list_files_tool,
+    "create_file": create_file_tool,
     "edit_file": edit_file_tool,
 }
 
@@ -175,13 +206,37 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "create_file",
+        "description": (
+            "Create a new text file inside the allowed project root with the provided "
+            "content. Use this for new files only. The tool creates missing parent "
+            "directories as needed, fails if the target file already exists, and cannot "
+            "create protected project files."
+        ),
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative or absolute path to the new file to create.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Complete text content to write into the new file.",
+                },
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "edit_file",
         "description": (
-            "Edit a text file inside the allowed project root by replacing the first "
-            "occurrence of old_str with new_str. Use this after reading enough context "
-            "to make a precise change. If old_str is an empty string, the tool creates "
-            "or overwrites the target file with new_str; protected project files cannot "
-            "be edited."
+            "Edit an existing text file inside the allowed project root by replacing "
+            "the first occurrence of old_str with new_str. Use this after reading enough "
+            "context to make a precise change. old_str must be non-empty; use create_file "
+            "for new files. Protected project files cannot be edited."
         ),
         "strict": True,
         "input_schema": {
@@ -193,11 +248,11 @@ TOOL_DEFINITIONS = [
                 },
                 "old_str": {
                     "type": "string",
-                    "description": "Exact text to replace, or an empty string to create or overwrite the file.",
+                    "description": "Exact non-empty text to replace. Empty strings are rejected; use create_file for new files.",
                 },
                 "new_str": {
                     "type": "string",
-                    "description": "Replacement text or complete new file content.",
+                    "description": "Replacement text.",
                 },
             },
             "required": ["path", "old_str", "new_str"],
@@ -269,6 +324,7 @@ def run_coding_agent_loop():
         if user_input == "quit" or user_input == "exit":
             break
         conversation.append({"role": "user", "content": user_input})
+        failed_tool_rounds = 0
         while True:
             response = execute_llm_call(conversation)
             assistant_content = [
@@ -289,6 +345,7 @@ def run_coding_agent_loop():
                 break
 
             tool_result_blocks = []
+            tool_round_had_failure = False
             for block in tool_use_blocks:
                 tool_use_id = block.id
                 name = block.name
@@ -319,10 +376,35 @@ def run_coding_agent_loop():
                     "content": tool_result,
                 }
                 if not resp["success"]:
+                    tool_round_had_failure = True
                     tool_result_block["is_error"] = True
                 tool_result_blocks.append(tool_result_block)
 
             conversation.append({"role": "user", "content": tool_result_blocks})
+            if tool_round_had_failure:
+                failed_tool_rounds += 1
+                if failed_tool_rounds >= MAX_FAILED_TOOL_ROUNDS:
+                    conversation.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Tool retry limit reached after "
+                                f"{MAX_FAILED_TOOL_ROUNDS} consecutive failed tool "
+                                "rounds. Do not repeat the same failed tool call "
+                                "pattern; inspect the prior tool errors and choose "
+                                "a different approach."
+                            ),
+                        }
+                    )
+                    print(
+                        f"{ASSISTANT_COLOR}Monet:{RESET_COLOR} "
+                        f"Stopping after {MAX_FAILED_TOOL_ROUNDS} consecutive failed "
+                        "tool rounds. Please revise the request or inspect the tool "
+                        "errors above."
+                    )
+                    break
+            else:
+                failed_tool_rounds = 0
 
 
 if __name__ == "__main__":
