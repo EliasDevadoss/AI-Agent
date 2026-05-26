@@ -5,7 +5,7 @@ import anthropic
 
 from dotenv import load_dotenv
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, TypedDict
+from typing import Any, Dict, List, TypedDict
 
 load_dotenv()
 
@@ -17,13 +17,14 @@ BLOCKED_WRITE_NAMES = {".env", ".gitignore", "uv.lock"}
 
 YOU_COLOR = "\u001b[94m"
 ASSISTANT_COLOR = "\u001b[93m"
+TOOL_COLOR = "\u001b[92m"
 RESET_COLOR = "\u001b[0m"
 
 
 class ToolCallResult(TypedDict):
     success: bool
     file_path: str | None
-    data: {}
+    data: Dict[str, Any]
     errors: str | None
 
 
@@ -34,7 +35,7 @@ def resolve_abs_path(path_str: str) -> Path:
     path = Path(path_str).expanduser()
     if not path.is_absolute():
         path = (Path.cwd() / path).resolve()
-    if path != PROJECT_ROOT and PROJECT_ROOT not in path.parents():
+    if path != PROJECT_ROOT and PROJECT_ROOT not in path.parents:
         raise PermissionError(
             f"Attempting to edit outside allowed current directory at: {path}"
         )
@@ -85,7 +86,7 @@ def edit_file_tool(path: str, old_str: str, new_str: str) -> ToolCallResult:
     :return: A dictionary with the path to the file and the action taken.
     """
     abs_path = resolve_abs_path(path)
-    path_parts = abs_path.parts()
+    path_parts = abs_path.parts
 
     if any(part in BLOCKED_WRITE_NAMES for part in path_parts):
         raise PermissionError(f"Not allowed to edit protected file at: {abs_path}")
@@ -125,65 +126,89 @@ TOOL_LIST = {
     "edit_file": edit_file_tool,
 }
 
+TOOL_DEFINITIONS = [
+    {
+        "name": "read_file",
+        "description": (
+            "Read the full text content of a file inside the allowed project root. "
+            "Use this when you need to inspect an existing source file, README, "
+            "configuration file, or other text file before answering or editing. "
+            "The filename parameter may be a relative path from the current project."
+        ),
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Relative or absolute path to the file to read.",
+                }
+            },
+            "required": ["filename"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_files",
+        "description": (
+            "List the immediate children of a directory inside the allowed project root. "
+            "Use this when you need to discover what files or subdirectories exist before "
+            "choosing which file to inspect or edit. The result includes each child name "
+            "and whether it is a file or directory, but does not recursively list contents."
+        ),
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative or absolute path to the directory to list.",
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": (
+            "Edit a text file inside the allowed project root by replacing the first "
+            "occurrence of old_str with new_str. Use this after reading enough context "
+            "to make a precise change. If old_str is an empty string, the tool creates "
+            "or overwrites the target file with new_str; protected project files cannot "
+            "be edited."
+        ),
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative or absolute path to the file to edit.",
+                },
+                "old_str": {
+                    "type": "string",
+                    "description": "Exact text to replace, or an empty string to create or overwrite the file.",
+                },
+                "new_str": {
+                    "type": "string",
+                    "description": "Replacement text or complete new file content.",
+                },
+            },
+            "required": ["path", "old_str", "new_str"],
+            "additionalProperties": False,
+        },
+    },
+]
+
 SYSTEM_PROMPT = """
-You are a coding assistant geared towards assisting the user in coding tasks. Please read the following instructions on
-tools carefully.
-
-
-You have access to some tools, which are listed here:
-
-{full_tool_list}
-
-To use a tool, your ENTIRE response must be a single line of the format: 'tool: 
-TOOL_NAME({{JSON_ARGS}})' and nothing more. 
-Use compact single-line JSON with double quotes. After receiving a tool_result(...) 
-message, you may continue the task. Do not respond with multiple tool calls before 
-receiving a successful response. If no tool call is needed, respond normally.
+You are a coding assistant geared towards assisting the user in coding tasks.
+Use tools when you need to inspect or change local project files. Explain your
+work normally when no tool call is needed.
 """
 
 
-def get_tool_str(tool_name: str) -> str:
-    tool = TOOL_LIST[tool_name]
-    return f"""
-    Name: {tool_name}
-    Description: {tool.__doc__}
-    Signature: {inspect.signature(tool)}
-    """
-
-
-def get_full_system_prompt():
-    full_tool_list = ""
-    for tool_name in TOOL_LIST:
-        full_tool_list += "TOOL:" + get_tool_str(tool_name)
-        full_tool_list += f"\n{'=' * 15}\n\n"
-    return SYSTEM_PROMPT.format(full_tool_list=full_tool_list)
-
-
-def extract_tool_calls(text: str) -> List[Tuple[str, Dict[str, Any]]]:
-    """
-    Return list of (tool_name, args) requested in 'tool: name({...})' lines.
-    The parser expects single-line, compact JSON in parentheses.
-    """
-    invocations = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("tool:"):
-            continue
-        try:
-            after = line[len("tool:") :].strip()
-            name, rest = after.split("(", 1)
-            name = name.strip()
-            if not rest.endswith(")"):
-                continue
-            json_str = rest[:-1].strip()
-            args = json.loads(json_str)
-            invocations.append((name, args))
-        except Exception:
-            continue
-    return invocations
-
-
-def execute_tool_call(name: str, args: Dict[str, str]) -> ToolCallResult:
+def execute_tool_call(name: str, args: Dict[str, Any]) -> ToolCallResult:
     if name not in TOOL_LIST:
         return ToolCallResult(
             success=False,
@@ -208,60 +233,87 @@ def execute_tool_call(name: str, args: Dict[str, str]) -> ToolCallResult:
     return tool(**args)
 
 
-def execute_llm_call(conversation: List[Dict[str, str]]):
-    system_content = ""
-    messages = []
+def format_tool_call(name: str, args: Dict[str, Any]) -> str:
+    return f"{name}({json.dumps(args, separators=(',', ':'))})"
 
-    for msg in conversation:
-        if msg["role"] == "system":
-            system_content = msg["content"]
-        else:
-            messages.append(msg)
 
-    response = claude_client.messages.create(
-        model=ai_model, max_tokens=2000, system=system_content, messages=messages
+def format_tool_result(result: ToolCallResult) -> str:
+    return json.dumps(result, separators=(",", ":"))
+
+
+def execute_llm_call(conversation: List[Dict[str, Any]]):
+    return claude_client.messages.create(
+        model=ai_model,
+        max_tokens=2000,
+        system=SYSTEM_PROMPT,
+        messages=conversation,
+        tools=TOOL_DEFINITIONS,
     )
-    return response.content[0].text
 
 
 def run_coding_agent_loop():
-    print(get_full_system_prompt())
-    conversation = [{"role": "system", "content": get_full_system_prompt()}]
+    conversation = []
     while True:
         try:
             user_input = input(f"{YOU_COLOR}You:{RESET_COLOR} ")
-        except KeyboardInterrupt, EOFError:
+        except (KeyboardInterrupt, EOFError):
             break
+        user_input = user_input.strip()
+        if not user_input:
+            continue
         if user_input == "quit" or user_input == "exit":
             break
-        conversation.append({"role": "user", "content": user_input.strip()})
+        conversation.append({"role": "user", "content": user_input})
         while True:
-            agent_response = execute_llm_call(conversation)
-            tool_calls = extract_tool_calls(agent_response)
-            if not tool_calls:
-                print(f"{ASSISTANT_COLOR}Assistant:{RESET_COLOR} {agent_response}")
-                conversation.append({"role": "assistant", "content": agent_response})
+            response = execute_llm_call(conversation)
+            assistant_content = [
+                block.model_dump(exclude_none=True) for block in response.content
+            ]
+            conversation.append({"role": "assistant", "content": assistant_content})
+
+            assistant_text = "\n".join(
+                block.text for block in response.content if block.type == "text"
+            ).strip()
+            if assistant_text:
+                print(f"{ASSISTANT_COLOR}Monet:{RESET_COLOR} {assistant_text}")
+
+            tool_use_blocks = [
+                block for block in response.content if block.type == "tool_use"
+            ]
+            if not tool_use_blocks:
                 break
-            for name, args in tool_calls:
-                print(name, args)
-                conversation.append(
-                    {"role": "assistant", "content": f"tool: {name}({args})"}
+
+            tool_result_blocks = []
+            for block in tool_use_blocks:
+                tool_use_id = block.id
+                name = block.name
+                args = block.input
+                print(
+                    f"{TOOL_COLOR}Tool call:{RESET_COLOR} "
+                    f"{format_tool_call(name, args)}"
                 )
                 try:
                     resp = execute_tool_call(name, args)
-                except (FileNotFoundError, PermissionError, TypeError) as e:
+                except (OSError, TypeError) as e:
                     resp = ToolCallResult(
                         success=False,
                         file_path=None,
                         data={"tool": name, "args": args},
                         errors=str(e),
                     )
-                conversation.append(
-                    {
-                        "role": "user",
-                        "content": f"tool_result({json.dumps(resp, separators=(',', ':'))})",
-                    }
-                )
+                tool_result = format_tool_result(resp)
+                truncated_tool_result = (tool_result[:1000] + "...") if len(tool_result) > 1000 else tool_result
+                print(f"{TOOL_COLOR}Tool result:{RESET_COLOR} {truncated_tool_result}")
+                tool_result_block = {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": tool_result,
+                }
+                if not resp["success"]:
+                    tool_result_block["is_error"] = True
+                tool_result_blocks.append(tool_result_block)
+
+            conversation.append({"role": "user", "content": tool_result_blocks})
 
 
 if __name__ == "__main__":
