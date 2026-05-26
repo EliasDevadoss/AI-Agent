@@ -1,8 +1,7 @@
 import inspect
 import json
-
-
-from openai import OpenAI
+import os
+import anthropic
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -10,7 +9,7 @@ from typing import Any, Dict, List, Tuple
 
 load_dotenv()
 
-client = OpenAI()
+claude_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 YOU_COLOR = "\u001b[94m"
 ASSISTANT_COLOR = "\u001b[93m"
@@ -50,7 +49,7 @@ def list_files_tool(path: str) -> Dict[str, Any]:
             "file_name": sub_path.name,
             "kind": "file" if sub_path.is_file() else "dir"
         })
-    return {"path": abs_path, "files": files}
+    return {"path": str(abs_path), "files": files}
 
 def edit_file_tool(path: str, old_str: str, new_str: str) -> Dict[str, Any]:
     """
@@ -82,3 +81,129 @@ TOOL_LIST = {
     "list_files": list_files_tool,
     "edit_file": edit_file_tool
 }
+
+SYSTEM_PROMPT = """
+You are a coding assistant geared towards assisting the user in coding tasks. Please read the following instructions on
+tools carefully.
+
+
+You have access to some tools, which are listed here:
+
+{full_tool_list}
+
+To use a tool, your ENTIRE response must be a single line of the format: 'tool: TOOL_NAME({{JSON_ARGS}})' and nothing more. 
+Use compact single-line JSON with double quotes. After receiving a tool_result(...) message, you may continue the task. Do 
+not respond with multiple tool calls before receiving a successful response. If no tool call is needed, respond normally.
+"""
+
+def get_tool_str(tool_name: str) -> str:
+    tool = TOOL_LIST[tool_name]
+    return f"""
+    Name: {tool_name}
+    Description: {tool.__doc__}
+    Signature: {inspect.signature(tool)}
+    """
+
+def get_full_system_prompt():
+    full_tool_list = ""
+    for tool_name in TOOL_LIST:
+        full_tool_list += "TOOL:" + get_tool_str(tool_name)
+        full_tool_list += f"\n{'='*15}\n\n"
+    return SYSTEM_PROMPT.format(full_tool_list=full_tool_list)
+
+def extract_tool_calls(text: str) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Return list of (tool_name, args) requested in 'tool: name({...})' lines.
+    The parser expects single-line, compact JSON in parentheses.
+    """
+    invocations = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("tool:"):
+            continue
+        try:
+            after = line[len("tool:"):].strip()
+            name, rest = after.split("(", 1)
+            name = name.strip()
+            if not rest.endswith(")"):
+                continue
+            json_str = rest[:-1].strip()
+            args = json.loads(json_str)
+            invocations.append((name, args))
+        except Exception:
+            continue
+    return invocations
+
+def execute_llm_call(conversation: List[Dict[str, str]]):
+    system_content = ""
+    messages = []
+    
+    for msg in conversation:
+        if msg["role"] == "system":
+            system_content = msg["content"]
+        else:
+            messages.append(msg)
+    
+    response = claude_client.messages.create(
+        model="claude-sonnet-4-5-20250929",
+        max_tokens=2000,
+        system=system_content,
+        messages=messages
+    )
+    return response.content[0].text
+
+
+def run_coding_agent_loop():
+    print(get_full_system_prompt())
+    conversation = [{
+        "role": "system",
+        "content": get_full_system_prompt()
+    }]
+    while True:
+        try:
+            user_input = input(f"{YOU_COLOR}You:{RESET_COLOR} ")
+        except (KeyboardInterrupt, EOFError):
+            break
+        if user_input == "quit" or user_input == "exit":
+            break
+        conversation.append({
+            "role": "user",
+            "content": user_input.strip()
+        })
+        while True:
+            agent_response = execute_llm_call(conversation)
+            tool_calls = extract_tool_calls(agent_response)
+            if not tool_calls:
+                print(f"{ASSISTANT_COLOR}Assistant:{RESET_COLOR} {agent_response}")
+                conversation.append({
+                    "role": "assistant",
+                    "content": agent_response
+                })
+                break
+            for name, args in tool_calls:
+                tool = TOOL_LIST[name]
+                resp = ""
+                print(name, args)
+                try:
+                    if name == "read_file":
+                        resp = tool(args.get("filename", "."))
+                    elif name == "list_files":
+                        resp = tool(args.get("path", "."))
+                    elif name == "edit_file":
+                        resp = tool(args.get("path", "."),
+                                    args.get("old_str", ""),
+                                    args.get("new_str", ""))
+                except Exception as e:
+                    resp = {
+                        "action": "Error",
+                        "tool": name,
+                        "args": args,
+                        "message": str(e)
+                    }
+                conversation.append({
+                    "role": "user",
+                    "content": f"tool_result({json.dumps(resp)})"
+                })
+
+if __name__ == "__main__":
+    run_coding_agent_loop()
